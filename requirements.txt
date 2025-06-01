@@ -1,3 +1,4 @@
 setuptools
+python-dotenv
 pydantic
 git+https://github.com/OperavonderVollmer/OperaPowerRelay@main
