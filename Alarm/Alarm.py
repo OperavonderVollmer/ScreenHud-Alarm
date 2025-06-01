@@ -128,7 +128,10 @@ class Alarm(BaseModel):
             now = datetime.datetime.now()
             changed = False
             if not instance.day:
-                instance.day = now.day
+                if now.time() > instance.trigger:
+                    instance.day = now.day + 1
+                else:
+                    instance.day = now.day
                 changed = True
             if not instance.months:
                 instance.months = [now.month]
@@ -169,20 +172,20 @@ class Alarm(BaseModel):
             "year": self.year
         }.items() if v is not None}
 
-    def calculate_time(self) -> datetime.datetime | None:
+    def calculate_time(self) -> datetime.datetime | str:
         now = datetime.datetime.now()
         trigger_target = datetime.datetime.combine(now.date(), self.trigger)
-        final = None
 
         def safe_datetime(year, month, day):
             last_day = calendar.monthrange(year, month)[1]
             valid_day = min(day, last_day)
             return datetime.datetime(year, month, valid_day, self.trigger.hour, self.trigger.minute)
 
-        def find_week():
+        def find_week() -> datetime.datetime | str:
             if not self.weekdays:
-                print(f"Alarm {self.title} does not have a valid weekday")
-                return None
+                m = f"Alarm {self.title} does not have a valid weekday"
+                print(m)
+                return m
 
             candidate_days = []
 
@@ -196,70 +199,83 @@ class Alarm(BaseModel):
 
                 candidate_days.append(candidate_trigger)
 
-            return min(candidate_days)
-        def find_periodic():
+            if candidate_days:
+                return min(candidate_days)
+            else:
+                m = f"Alarm {self.title} could not find a valid upcoming weekday trigger."
+                print(m)
+                return m
+        
+        def find_periodic() -> datetime.datetime | str:
             if not self.months or not self.day:
-                print(f"Alarm {self.title} does not have a valid periodic date")
-                return None
+                m = f"Alarm {self.title} does not have a valid periodic date"
+                print(m)
+                return m
 
-            candidates = []
+            candidate_days = []
             current_year = now.year            
 
             for m in self.months:
                 dt = safe_datetime(current_year, m, self.day)
                 if dt > now:
-                    candidates.append(dt)
+                    candidate_days.append(dt)
 
-            if not candidates:
+            if not candidate_days:
                 for m in self.months:
                     dt = safe_datetime(current_year + 1, m, self.day)
-                    candidates.append(dt)
+                    candidate_days.append(dt)
 
-            return min(candidates) if candidates else None
-
+            if candidate_days:
+                return min(candidate_days)
+            else:
+                m = f"Alarm {self.title} could not find a valid upcoming periodic trigger."
+                print(m)
+                return m
 
 
         match self.reoccurence_type:
             case ReoccurenceType.DONE:
-                print(f"Alarm {self.title} is done")
-                return None
+                return f"Alarm {self.title} is done"
 
             case ReoccurenceType.DAILY:
-                final = trigger_target if now < trigger_target else trigger_target + datetime.timedelta(days=1)
+                return trigger_target if now < trigger_target else trigger_target + datetime.timedelta(days=1)
 
             case ReoccurenceType.WEEKLY:
-                final = find_week() 
+                return find_week()
             
             case ReoccurenceType.PERIODIC:
-                final = find_periodic()
+                return find_periodic()
 
             case ReoccurenceType.NONE:
                 if not self.year or not self.months or not self.day:
-                    print(f"Alarm {self.title} does not have a valid one-off date")
-                    return None
+                    m = f"Alarm {self.title} does not have a valid one-off date"
+                    print(m)
+                    return m
                 
                 final = datetime.datetime(self.year, self.months[0], self.day, self.trigger.hour, self.trigger.minute)
 
                 if final < now:
                     if self.autopopped:
                         final += datetime.timedelta(days=1)
+                        return final
                     else:
                         self.reoccurence_type = ReoccurenceType.DONE
-                        return None
+                        return f"Alarm {self.title} is done"
+
+                return final
             
             case _:
-                raise ValueError(f"Invalid reoccurence type: {self.reoccurence_type}")
+                return f"Alarm {self.title} does not have a valid reoccurence type"
                             
 
-        return final if final else None
 
 
     def start(self) -> str:
         self.stop()
         self._stop_event.clear()
         t = self.calculate_time()
-        if not t:
-            return (f"Alarm not started: {self.title}")
+        if isinstance(t, str):
+            return t
         t_in_seconds = int((t - datetime.datetime.now()).total_seconds())
         threading.Thread(target=self._alarm_thread, args=(t_in_seconds,), daemon=True).start()
         return f"Alarm started: {self.title} | Ringing in {t_in_seconds} seconds"
@@ -326,6 +342,23 @@ class AlarmManager:
         self._filepath = filepath or os.path.join(opr.get_special_folder_path("Documents"), "Opera Tools", "screenhud_alarms.json")
         self._alarm_list: list[Alarm] = []
         self.load_alarms()
+        self.shutdown_event = threading.Event()
+
+    def boot_auto_save(self) -> None:
+        threading.Thread(target=self.auto_save, daemon=True).start()
+
+    def auto_save(self) -> None:
+        # Save alarms every hour
+        while True:
+            try:            
+                if self.shutdown_event.wait(3600):
+                    return  
+                self.save_alarms()
+            except Exception as e:
+                opr.error_pretty(exc=e, name="ScreenHud-Alarm", message="Error saving alarm list")
+                continue
+            finally:
+                self.save_alarms()
 
     def load_alarms(self) -> str:
         self._alarm_list.clear()
@@ -349,12 +382,19 @@ class AlarmManager:
         self._alarm_list.append(alarm)
         return alarm
     
-    def start_alarms(self) -> list[str]:
+    def start_all_alarms(self) -> list[str]:
         resp = []
         for alarm in self._alarm_list:
             resp.append(alarm.start())
 
         return resp
+    
+    def start_alarm(self, name: str) -> str:
+        for alarm in self._alarm_list:
+            if alarm.title == name:
+                return alarm.start()
+
+        return f"Alarm not found: {name}"
 
     def list_alarms(self) -> list[Alarm]:
         return self._alarm_list
@@ -364,10 +404,19 @@ class AlarmManager:
         message = opr.save_json(is_from="ScreenHud-Alarm", path=os.path.dirname(self._filepath), dump=alarm_json, filename="screenhud_alarms.json", use_temp=True)  
         return message
 
-    def clear_alarms(self) -> str:
+    def clear_all_alarms(self) -> str:
 
         self._alarm_list.clear()
 
         m = f"Alarm list cleared. {len(self._alarm_list)} alarms remaining. Make sure to save the alarm list before exiting the application."
+        print(m)
+        return m
+    
+    def clear_alarm(self, name: str) -> str:
+        for alarm in self._alarm_list:
+            if alarm.title == name:
+                self._alarm_list.remove(alarm)
+
+        m = f"Alarm {name} cleared. {len(self._alarm_list)} alarms remaining. Make sure to save the alarm list before exiting the application."
         print(m)
         return m
