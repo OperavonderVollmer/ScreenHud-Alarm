@@ -319,15 +319,47 @@ class Alarm(BaseModel):
             return (f"FAILED: Something went wrong - {e}", False)
 
     def _alarm_thread(self, t: int) -> None:
+        """
+        Manages the countdown for the alarm in a separate thread and triggers the alarm.
+
+        This function runs in a separate thread to handle the countdown of the alarm.
+        It periodically checks if the alarm should be stopped prematurely. If the countdown
+        completes without interruption, it triggers the alarm by calling the `buzz` method.
+
+        Parameters
+        ----------
+        t : int
+            The initial countdown time in seconds.
+
+        Returns
+        -------
+        None
+        """
+
         self.ticking = True
-        opr.write_log(isFrom="ScreenHud-Alarm", path=(os.path.join(opr.get_special_folder_path("Documents"), "Opera Tools")), filename="screenhud_alarms.log", message=f"Alarm Ticking: {self.title}", level="INFO")
-        try:            
-            if self._stop_event.wait(t):
-                return  # Event was set, stop thread
-            self.ticking = False
+        opr.write_log(
+            isFrom="ScreenHud-Alarm",
+            path=os.path.join(opr.get_special_folder_path("Documents"), "Opera Tools"),
+            filename="screenhud_alarms.log",
+            message=f"Alarm Ticking: {self.title}",
+            level="INFO"
+        )
+
+        MAX_WAIT = 24 * 24 * 60 * 60  # 2,073,600 seconds = ~24 days
+
+        try:
+            remaining = t
+            print(f"\nAlarm Ticking: {self.title}\nRinging in: {self.calculate_time()}\nWaiting: {opr.seconds_to_time(remaining)}\n")
+            while remaining > 0:
+                wait_time = min(remaining, MAX_WAIT - 1)
+                if self._stop_event.wait(wait_time): return  # Interrupted manually
+                remaining -= wait_time
+
             self.buzz()
+
         finally:
             self.ticking = False  # Ensure cleanup
+
 
     def stop(self) -> str:
         if hasattr(self, "_stop_event"):
@@ -380,6 +412,7 @@ class AlarmManager:
                 return None
 
         self._alarm_list.append(alarm)
+        self.save_alarms()
         return alarm
     
     def start_all_alarms(self) -> list[str]:
