@@ -430,7 +430,8 @@ class AlarmManager:
         return f"Alarm not found: {name}"
 
     def list_alarms(self) -> list[Alarm]:
-        return self._alarm_list
+
+            return self._alarm_list
 
     def save_alarms(self) -> str:
         alarm_json = {"alarms": [a.to_json() for a in self._alarm_list]}
