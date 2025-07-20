@@ -92,7 +92,7 @@ class Alarm(BaseModel):
     creation: datetime.date
     trigger: datetime.time
     reoccurence_type: ReoccurenceType
-    """ Weekdays
+    """ Weekdays | Uses ISO weekdays (1-7)
     1 = Monday
     2 = Tuesday
     3 = Wednesday
@@ -117,7 +117,7 @@ class Alarm(BaseModel):
     12 = December
     """
     months: Optional[list[int]] = None
-    day: Optional[int] = None               # 1-31
+    days: Optional[list[int]] = None               # 1-31
     year: Optional[int] = None              # NOTE: ONLY USED FOR ONE-OFF ALARMS
     ticking: bool = False
     autopopped: bool = False
@@ -127,11 +127,11 @@ class Alarm(BaseModel):
         if instance.reoccurence_type == ReoccurenceType.NONE:
             now = datetime.datetime.now()
             changed = False
-            if not instance.day:
+            if not instance.days:
                 if now.time() > instance.trigger:
-                    instance.day = now.day + 1
+                    instance.days = [now.day + 1]
                 else:
-                    instance.day = now.day
+                    instance.days = [now.day]
                 changed = True
             if not instance.months:
                 instance.months = [now.month]
@@ -155,6 +155,9 @@ class Alarm(BaseModel):
             data["trigger"] = datetime.time.fromisoformat(data["trigger"])
         if isinstance(data.get("reoccurence_type"), str):
             data["reoccurence_type"] = ReoccurenceType(data["reoccurence_type"])
+        for field in ["days", "months", "weekdays"]:
+            if isinstance(data.get(field), int):
+                data[field] = [data[field]]
         return cls(**data)
     
     def to_json(self) -> dict:
@@ -168,7 +171,7 @@ class Alarm(BaseModel):
             "reoccurence_type": self.reoccurence_type.value,
             "weekdays": self.weekdays,
             "months": self.months,
-            "day": self.day,
+            "days": self.days,
             "year": self.year
         }.items() if v is not None}
 
@@ -207,30 +210,44 @@ class Alarm(BaseModel):
                 return m
         
         def find_periodic() -> datetime.datetime | str:
-            if not self.months or not self.day:
-                m = f"Alarm {self.title} does not have a valid periodic date"
-                print(m)
-                return m
+            if not self.months or (not self.days and not self.weekdays):
+                month = f"Alarm {self.title} does not have a valid periodic date"
+                print(month)
+                return month
 
             candidate_days = []
-            current_year = now.year            
+            year = now.year     
 
-            for m in self.months:
-                dt = safe_datetime(current_year, m, self.day)
-                if dt > now:
-                    candidate_days.append(dt)
+            for offset in range(2):
+                if self.days:
+                    for month in self.months:                    
+                        for day in self.days:
+                            safe_date = safe_datetime(year, month, day)
+                            if safe_date > now:
+                                candidate_days.append(safe_date)
 
-            if not candidate_days:
-                for m in self.months:
-                    dt = safe_datetime(current_year + 1, m, self.day)
-                    candidate_days.append(dt)
+                if self.weekdays:
+                    for month in self.months:
+                        # Generates all of the days in the month along with the trigger dates, then adds candidates based on weekdays
+                        days_in_month = calendar.monthrange(year, month)[1]
+                        for day in range(1, days_in_month + 1):
+                            dt_candidate = datetime.datetime(year, month, day, self.trigger.hour, self.trigger.minute)
+                            if dt_candidate.weekday() + 1 in self.weekdays and dt_candidate > now:
+                                candidate_days.append(dt_candidate)
+
+                if candidate_days:
+                    break
+
+                year += 1
+
 
             if candidate_days:
+                candidate_days = list(set(candidate_days))  # Remove duplicates
                 return min(candidate_days)
             else:
-                m = f"Alarm {self.title} could not find a valid upcoming periodic trigger."
-                print(m)
-                return m
+                error_message = f"Alarm {self.title} could not find a valid upcoming periodic trigger."
+                print(error_message)
+                return error_message
 
 
         match self.reoccurence_type:
@@ -247,16 +264,17 @@ class Alarm(BaseModel):
                 return find_periodic()
 
             case ReoccurenceType.NONE:
-                if not self.year or not self.months or not self.day:
+                if not self.year or not self.months or not self.days:
                     m = f"Alarm {self.title} does not have a valid one-off date"
                     print(m)
                     return m
                 
-                final = datetime.datetime(self.year, self.months[0], self.day, self.trigger.hour, self.trigger.minute)
+                final = datetime.datetime(self.year, self.months[0], self.days[0], self.trigger.hour, self.trigger.minute)
 
                 if final < now:
                     if self.autopopped:
-                        final += datetime.timedelta(days=1)
+                        f = final + datetime.timedelta(days=1)
+                        final = safe_datetime(f.year, f.month, f.day)
                         return final
                     else:
                         self.reoccurence_type = ReoccurenceType.DONE
@@ -284,9 +302,8 @@ class Alarm(BaseModel):
         t = (snooze_hours * 3600) + (snooze_minutes * 60) + (snooze_seconds)
 
         if t <= 0:
-            m = f"Invalid snooze duration: {t} seconds. Skipping."
-            opr.write_log(isFrom="ScreenHud-Alarm", path=(os.path.join(opr.get_special_folder_path("Documents"), "Opera Tools")), filename="screenhud_alarms.log", message=f"Alarm Snoozed: {self.title} | {m}", level="INFO")
-            return m
+            opr.write_log(isFrom="ScreenHud-Alarm", path=(os.path.join(opr.get_special_folder_path("Documents"), "Opera Tools")), filename="screenhud_alarms.log", message=f"Alarm Snoozed: {self.title} | Invalid snooze time, using default of 10 minutes", level="INFO")
+            t = 600
         
         self.stop()
         self._stop_event.clear()
@@ -401,6 +418,8 @@ class AlarmManager:
             self._alarm_list.append(Alarm.from_json(alarm))
 
         return f"Alarm list loaded: {len(self._alarm_list)} alarms"
+
+# TODO: Json parameter which forces using alarm's from json method
 
     def add_alarm(self, alarm: Alarm = None, **kwargs) -> Alarm | None: # type: ignore
 
